@@ -657,6 +657,7 @@ ENV_RERANKER_TYPESAFE_PRUNE_CANDIDATES = "HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_
 # Alibaba Cloud DashScope configuration (reranker only)
 ENV_RERANKER_ALIBABA_API_KEY = "HINDSIGHT_API_RERANKER_ALIBABA_API_KEY"
 ENV_RERANKER_ALIBABA_MODEL = "HINDSIGHT_API_RERANKER_ALIBABA_MODEL"
+ENV_RERANKER_ALIBABA_BASE_URL = "HINDSIGHT_API_RERANKER_ALIBABA_BASE_URL"
 
 # Google Discovery Engine reranker configuration
 ENV_RERANKER_GOOGLE_MODEL = "HINDSIGHT_API_RERANKER_GOOGLE_MODEL"
@@ -1442,6 +1443,11 @@ DEFAULT_RERANKER_TYPESAFE_MAX_CONCURRENT = 24
 DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES = False
 
 DEFAULT_RERANKER_ALIBABA_MODEL = "qwen3-rerank"
+# Public DashScope endpoint; dedicated Alibaba Cloud Model Studio workspace
+# gateways host the same Cohere-compatible /v1/reranks path under their own base
+# URL, typically https://{WorkspaceId}.<region>.maas.aliyuncs.com/compatible-api
+# (see ENV_RERANKER_ALIBABA_BASE_URL).
+DEFAULT_RERANKER_ALIBABA_BASE_URL = "https://dashscope.aliyuncs.com/compatible-api"
 
 DEFAULT_RERANKER_GOOGLE_MODEL = "semantic-ranker-default-004"
 
@@ -2759,6 +2765,7 @@ class RerankerMemberConfig:
     # alibaba
     alibaba_api_key: str | None
     alibaba_model: str
+    alibaba_base_url: str
     alibaba_timeout: float
     # google
     google_model: str
@@ -2916,6 +2923,7 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
                 ),
                 alibaba_api_key=_member_opt_str(base, "ALIBABA_API_KEY"),
                 alibaba_model=_member_str(base, "ALIBABA_MODEL", DEFAULT_RERANKER_ALIBABA_MODEL),
+                alibaba_base_url=_member_str(base, "ALIBABA_BASE_URL", DEFAULT_RERANKER_ALIBABA_BASE_URL),
                 alibaba_timeout=_member_float(base, "ALIBABA_TIMEOUT", DEFAULT_RERANKER_ALIBABA_TIMEOUT),
                 google_model=_member_str(base, "GOOGLE_MODEL", DEFAULT_RERANKER_GOOGLE_MODEL),
                 google_project_id=_member_opt_str(base, "GOOGLE_PROJECT_ID"),
@@ -3323,6 +3331,7 @@ class HindsightConfig:
     reranker_typesafe_prune_candidates: bool
     reranker_alibaba_api_key: str | None
     reranker_alibaba_model: str
+    reranker_alibaba_base_url: str
     reranker_alibaba_timeout: float
     reranker_google_model: str
     reranker_google_project_id: str | None
@@ -3748,6 +3757,7 @@ class HindsightConfig:
         "reranker_zeroentropy_base_url",
         "reranker_siliconflow_base_url",
         "reranker_typesafe_base_url",
+        "reranker_alibaba_base_url",
         # Service Account Keys
         "llm_vertexai_service_account_key",
         "embeddings_vertexai_service_account_key",
@@ -3937,6 +3947,7 @@ class HindsightConfig:
             typesafe_prune_candidates=self.reranker_typesafe_prune_candidates,
             alibaba_api_key=self.reranker_alibaba_api_key,
             alibaba_model=self.reranker_alibaba_model,
+            alibaba_base_url=self.reranker_alibaba_base_url,
             alibaba_timeout=self.reranker_alibaba_timeout,
             google_model=self.reranker_google_model,
             google_project_id=self.reranker_google_project_id,
@@ -4779,6 +4790,7 @@ class HindsightConfig:
             # Alibaba Cloud DashScope reranker
             reranker_alibaba_api_key=os.getenv(ENV_RERANKER_ALIBABA_API_KEY),
             reranker_alibaba_model=os.getenv(ENV_RERANKER_ALIBABA_MODEL, DEFAULT_RERANKER_ALIBABA_MODEL),
+            reranker_alibaba_base_url=os.getenv(ENV_RERANKER_ALIBABA_BASE_URL, DEFAULT_RERANKER_ALIBABA_BASE_URL),
             reranker_alibaba_timeout=float(
                 os.getenv(ENV_RERANKER_ALIBABA_TIMEOUT, str(DEFAULT_RERANKER_ALIBABA_TIMEOUT))
             ),

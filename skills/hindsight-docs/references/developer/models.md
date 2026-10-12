@@ -1244,6 +1244,7 @@ export HINDSIGHT_API_RERANKER_TYPESAFE_MODEL=jev-latest  # default, can omit
 export HINDSIGHT_API_RERANKER_PROVIDER=alibaba
 export HINDSIGHT_API_RERANKER_ALIBABA_API_KEY=your-dashscope-api-key
 export HINDSIGHT_API_RERANKER_ALIBABA_MODEL=qwen3-rerank  # default, can omit
+# export HINDSIGHT_API_RERANKER_ALIBABA_BASE_URL=https://dashscope.aliyuncs.com/compatible-api  # default; for a Model Studio workspace gateway use https://{WorkspaceId}.<region>.maas.aliyuncs.com/compatible-api
 
 # TEI (self-hosted)
 export HINDSIGHT_API_RERANKER_PROVIDER=tei

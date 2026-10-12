@@ -76,7 +76,10 @@ def _make_config(**overrides) -> HindsightConfig:
         ),
         (
             "alibaba",
-            {"reranker_alibaba_api_key": "k"},
+            {
+                "reranker_alibaba_api_key": "k",
+                "reranker_alibaba_base_url": "https://dashscope.aliyuncs.com/compatible-api",
+            },
             "reranker_alibaba_timeout",
             ("_client", "timeout"),
         ),
