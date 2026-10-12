@@ -20,6 +20,7 @@ import aiohttp
 from .._cross_loop import CrossLoopSemaphore
 from ..config import (
     DEFAULT_LITELLM_API_BASE,
+    DEFAULT_RERANKER_ALIBABA_BASE_URL,
     DEFAULT_RERANKER_ALIBABA_MODEL,
     DEFAULT_RERANKER_COHERE_MODEL,
     DEFAULT_RERANKER_FLASHRANK_BATCH_SIZE,
@@ -2030,22 +2031,28 @@ class AlibabaCloudCrossEncoder(CrossEncoderModel):
     Uses the Cohere-compatible /reranks endpoint, which is the standard interface
     for qwen3-rerank. Authentication via HINDSIGHT_API_RERANKER_ALIBABA_API_KEY
     (or DASHSCOPE_API_KEY as a fallback).
+    The endpoint is configurable via base_url: dedicated Alibaba Cloud Model Studio
+    workspace gateways host the same path under their own base URL, which is
+    required when egress is restricted to the gateway (mirrors the SiliconFlow
+    pattern). Default base URL targets the public DashScope endpoint.
     See: https://help.aliyun.com/zh/model-studio/text-rerank-api
     """
 
-    RERANK_URL = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+    RERANK_PATH = "/v1/reranks"
 
     def __init__(
         self,
         api_key: str,
         model: str = DEFAULT_RERANKER_ALIBABA_MODEL,
+        base_url: str = DEFAULT_RERANKER_ALIBABA_BASE_URL,
         timeout: float = 60.0,
     ):
         self.model = model
+        self.base_url = base_url.rstrip("/")
         self._client = _CohereCompatibleRerankClient(
             api_key=api_key,
             model=model,
-            rerank_url=self.RERANK_URL,
+            rerank_url=f"{self.base_url}{self.RERANK_PATH}",
             timeout=timeout,
             include_return_documents=False,
         )
@@ -2057,7 +2064,7 @@ class AlibabaCloudCrossEncoder(CrossEncoderModel):
     async def initialize(self) -> None:
         if self._client.initialized:
             return
-        logger.info(f"Reranker: initializing Alibaba Cloud provider with model {self.model}")
+        logger.info(f"Reranker: initializing Alibaba Cloud provider with model {self.model} at {self.base_url}")
         await self._client.initialize()
         logger.info("Reranker: Alibaba Cloud provider initialized")
 
@@ -2351,6 +2358,7 @@ def _create_cross_encoder_backend(member: RerankerMemberConfig) -> CrossEncoderM
         return AlibabaCloudCrossEncoder(
             api_key=api_key,
             model=member.alibaba_model,
+            base_url=member.alibaba_base_url,
             timeout=member.alibaba_timeout,
         )
     elif provider == "typesafe":
