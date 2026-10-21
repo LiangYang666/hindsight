@@ -1,8 +1,11 @@
 """Recall items — the texts behind ``recalled N memories`` (issue agentus#37).
 
 The count alone is a claim; these are what a host expands. Two rules matter and both are cheap to
-state, expensive to get wrong: the frame is capped (a 200-char item, a 6K turn) and truncation is
+state, expensive to get wrong: the frame is capped (400 chars an item, 12K a turn) and truncation is
 REPORTED, because a silently shortened memory list looks like the bank had nothing better.
+
+There is no item COUNT cap on purpose: the total is what costs wire and SQLite bytes, and a count
+cap drops whole memories even when the budget would have carried them.
 """
 
 from __future__ import annotations
@@ -10,7 +13,14 @@ from __future__ import annotations
 import dataclasses
 from types import SimpleNamespace
 
-from hindsight_hermes import _RECALL_ITEMS_MAX_CHARS, _RECALL_ITEM_MAX_CHARS, _recall_items
+import pytest
+
+from hindsight_hermes import (
+    _RECALL_ITEMS_MAX_CHARS,
+    _RECALL_ITEM_MAX_CHARS,
+    _recall_caps,
+    _recall_items,
+)
 
 
 def _result(text: str, **kw) -> SimpleNamespace:
@@ -87,3 +97,46 @@ def test_recall_status_passes_items_at_construction_and_degrades_on_an_old_host(
     assert fresh.items == [{"text": "a"}] and fresh.truncated is True
     stale = build(OldHost, [{"text": "a"}], True)
     assert stale.count == 2 and not hasattr(stale, "items")
+
+
+def test_item_count_is_not_capped_only_the_total_is() -> None:
+    """60 short memories fit the turn budget, so all 60 must arrive — a count cap would have
+    silently dropped 40 of them while the operator's budget was never touched."""
+    results = [_result(f"memory {i}") for i in range(60)]
+    items, truncated = _recall_items(results)
+    assert len(items) == 60
+    assert truncated is False
+
+
+def test_caps_default_to_the_operator_values() -> None:
+    assert _RECALL_ITEM_MAX_CHARS == 400
+    assert _RECALL_ITEMS_MAX_CHARS == 12_000
+    assert _recall_caps({}) == (400, 12_000)
+
+
+def test_caps_come_from_env_before_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host (a cockpit) overrides per spawn through the environment."""
+    monkeypatch.setenv("HINDSIGHT_RECALL_ITEM_CHARS", "250")
+    monkeypatch.setenv("HINDSIGHT_RECALL_TOTAL_CHARS", "9000")
+    assert _recall_caps({"recallItemChars": 111, "recallTotalChars": 222}) == (250, 9000)
+    monkeypatch.delenv("HINDSIGHT_RECALL_ITEM_CHARS")
+    monkeypatch.delenv("HINDSIGHT_RECALL_TOTAL_CHARS")
+    assert _recall_caps({"recallItemChars": 111, "recallTotalChars": 222}) == (111, 222)
+
+
+def test_nonsense_caps_fall_back_to_the_default_not_to_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 / negative / junk must never mean "no cap" — one turn would become a megabyte."""
+    for bad in ("0", "-5", "abc", ""):
+        monkeypatch.setenv("HINDSIGHT_RECALL_ITEM_CHARS", bad)
+        monkeypatch.setenv("HINDSIGHT_RECALL_TOTAL_CHARS", bad)
+        assert _recall_caps({}) == (400, 12_000), bad
+
+
+def test_explicit_caps_are_honoured() -> None:
+    items, truncated = _recall_items([_result("z" * 50)], item_max_chars=10, total_max_chars=1000)
+    assert items[0]["text"] == "z" * 10 + "…"
+    assert truncated is True
+    items, truncated = _recall_items([_result("a" * 30), _result("b" * 30)], total_max_chars=40)
+    assert [i["text"] for i in items] == ["a" * 30]
+    assert truncated is True
+
