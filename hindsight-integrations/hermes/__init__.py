@@ -1154,7 +1154,24 @@ class HindsightMemoryProvider(MemoryProvider):
             # stop: restarting the daemon now would boot it keyless, which is the
             # exact outage this guards against. _get_client() below sends the daemon
             # whatever key WAS available (config, secret scope, or the file itself).
-            if _load_simple_env(_embedded_profile_env_path(self._config)) != _build_embedded_profile_env(self._config):
+            # ---- 本地补丁（agent-dev workspace，2026-10-03）--------------------------------
+            # 上游在这里比较整个字典，而 hindsight-embed 自己会往 profile .env 里写回
+            # HINDSIGHT_API_PORT（create_profile / _resolve_ports，每次起 daemon 都写），
+            # _build_embedded_profile_env 却只产出 LLM/idle 键 → 端口键构成"永久漂移"：
+            # 每个新会话都会 materialize + stop 正在跑的 daemon、再冷启动一个（约 90s 内存空窗；
+            # 一次性/短会话还可能在退出时把 daemon 留在停止态 → 下个会话再来一遍）。
+            # 规则：比较时忽略端口键（它由 embed 管理器拥有），其余键仍全量比较，
+            # 所以清空 base_url 之类照样会触发重写。重打脚本：
+            # areas/hindsight-memory/scripts/patch-plugin-port-drift.sh
+            _disk_profile_env = _load_simple_env(_embedded_profile_env_path(self._config))
+            _built_profile_env = _build_embedded_profile_env(self._config)
+            # 本地补丁（2026-10-18）：只比较 **插件自己产出的键**。profile .env 里还有别人写的东西 ——
+            # HINDSIGHT_API_PORT（embed 管理器写回）、模型路径（操作员按 README 手填）、reranker 上限
+            # 这类调参 —— 它们不是"配置变了"。整字典比较的后果是：操作员每加一个自己的键，每个新会话
+            # 都会 stop 掉健康的 daemon 再冷启动（90s 空窗）。缺键/改值仍会触发重写，所以真配置变更照旧生效。
+            _disk_owned = {k: _disk_profile_env.get(k) for k in _built_profile_env}
+            if _disk_owned != _built_profile_env:
+                # ---------------------------------------------------------------------------
                 if _may_rewrite_profile_env(self._config):
                     _materialize_embedded_profile_env(self._config)
                     if _daemon_is_running(profile):
