@@ -102,26 +102,62 @@ def _cloud_api_key(config: dict) -> str:
 # Recall items: what ``recall_status()`` carries besides the count. Caps exist because this rides
 # a per-turn status frame, not a data channel — a bank with long memories must not turn every turn
 # into a 200KB websocket message. Truncation is reported, never silent.
-_RECALL_ITEM_MAX_CHARS = 200
-_RECALL_ITEMS_MAX_CHARS = 6000
+#
+# Two knobs, both overridable (operator 2026-10-21: 「统一改成400字/12K吧，条数不限制，按照12K总数来，
+# 然后支持设置中可配」): per-item characters, and the per-turn total. There is deliberately NO item
+# COUNT cap — the total is what costs wire and SQLite bytes, and a count cap silently drops whole
+# memories even when the budget would have fit them.
+_RECALL_ITEM_MAX_CHARS = 400
+_RECALL_ITEMS_MAX_CHARS = 12_000
+_RECALL_ITEM_ENV = "HINDSIGHT_RECALL_ITEM_CHARS"
+_RECALL_TOTAL_ENV = "HINDSIGHT_RECALL_TOTAL_CHARS"
 
 
-def _recall_items(results) -> tuple[list[dict], bool]:
+def _recall_caps(config: Optional[dict] = None) -> tuple[int, int]:
+    """``(item_chars, total_chars)`` — env first, then the plugin config, then the defaults.
+
+    Env before config on purpose: the HOST spawning this agent (a cockpit) decides how much of the
+    per-turn frame it wants to store, and it does that per spawn, not by editing this file.  A
+    value that is missing/unparsable/≤0 keeps the default rather than disabling the cap: an
+    accidental 0 must not turn one turn into a megabyte.
+    """
+    cfg = config or {}
+
+    def pick(env_key: str, cfg_key: str, default: int) -> int:
+        raw = os.environ.get(env_key)
+        if raw is None or str(raw).strip() == "":
+            raw = cfg.get(cfg_key)
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    return (pick(_RECALL_ITEM_ENV, "recallItemChars", _RECALL_ITEM_MAX_CHARS),
+            pick(_RECALL_TOTAL_ENV, "recallTotalChars", _RECALL_ITEMS_MAX_CHARS))
+
+
+def _recall_items(results, item_max_chars: Optional[int] = None,
+                  total_max_chars: Optional[int] = None) -> tuple[list[dict], bool]:
     """Recall results -> ``([{text, tags?, type?}], truncated)``, item-capped and total-capped.
 
     Copies strings out of the client's objects: the caller hands them to a status frame and then
     drops the response, so anything not copied here is unreachable a moment later.
     """
+    item_cap = item_max_chars if isinstance(item_max_chars, int) and item_max_chars > 0 \
+        else _RECALL_ITEM_MAX_CHARS
+    total_cap = total_max_chars if isinstance(total_max_chars, int) and total_max_chars > 0 \
+        else _RECALL_ITEMS_MAX_CHARS
     items: list[dict] = []
     used, truncated = 0, False
     for r in results:
         text = (getattr(r, "text", "") or "").strip()
         if not text:
             continue
-        if len(text) > _RECALL_ITEM_MAX_CHARS:
-            text = text[:_RECALL_ITEM_MAX_CHARS].rstrip() + "…"
+        if len(text) > item_cap:
+            text = text[:item_cap].rstrip() + "…"
             truncated = True
-        if used + len(text) > _RECALL_ITEMS_MAX_CHARS:
+        if used + len(text) > total_cap:
             truncated = True
             break
         item: dict = {"text": text}
@@ -1291,7 +1327,7 @@ class HindsightMemoryProvider(MemoryProvider):
             )
             results = self._recall(query)
             logger.debug("Recall: returned %d results", len(results))
-            items, truncated = _recall_items(results)
+            items, truncated = _recall_items(results, *_recall_caps(self._config))
             return "\n".join(f"- {r.text}" for r in results if r.text), len(results), items, truncated
         except Exception as e:
             logger.debug("Hindsight recall failed: %s", e, exc_info=True)
