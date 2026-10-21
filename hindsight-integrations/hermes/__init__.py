@@ -99,6 +99,44 @@ def _cloud_api_key(config: dict) -> str:
     return config.get("apiKey") or config.get("api_key") or get_secret("HINDSIGHT_API_KEY", "")
 
 
+# Recall items: what ``recall_status()`` carries besides the count. Caps exist because this rides
+# a per-turn status frame, not a data channel — a bank with long memories must not turn every turn
+# into a 200KB websocket message. Truncation is reported, never silent.
+_RECALL_ITEM_MAX_CHARS = 200
+_RECALL_ITEMS_MAX_CHARS = 6000
+
+
+def _recall_items(results) -> tuple[list[dict], bool]:
+    """Recall results -> ``([{text, tags?, type?}], truncated)``, item-capped and total-capped.
+
+    Copies strings out of the client's objects: the caller hands them to a status frame and then
+    drops the response, so anything not copied here is unreachable a moment later.
+    """
+    items: list[dict] = []
+    used, truncated = 0, False
+    for r in results:
+        text = (getattr(r, "text", "") or "").strip()
+        if not text:
+            continue
+        if len(text) > _RECALL_ITEM_MAX_CHARS:
+            text = text[:_RECALL_ITEM_MAX_CHARS].rstrip() + "…"
+            truncated = True
+        if used + len(text) > _RECALL_ITEMS_MAX_CHARS:
+            truncated = True
+            break
+        item: dict = {"text": text}
+        tags = getattr(r, "tags", None)
+        if tags:
+            with contextlib.suppress(Exception):
+                item["tags"] = [str(t) for t in tags][:8]
+        kind = getattr(r, "type", None) or getattr(r, "memory_type", None)
+        if kind:
+            item["type"] = str(kind)
+        items.append(item)
+        used += len(text)
+    return items, truncated
+
+
 def _warn_if_client_outdated() -> None:
     """Warn when the installed ``hindsight-client`` is below what this plugin needs.
 
@@ -431,9 +469,13 @@ class HindsightMemoryProvider(MemoryProvider):
 
         # Recall: pending prefetch block + count, and the indicator state (recall_status()).
         self._prefetch_result, self._prefetch_count = "", 0
+        # Items ride along with the count: the count alone is a claim, the item texts are what a
+        # host can expand into "which memories were these?". Same lifecycle as the block itself.
+        self._prefetch_items, self._prefetch_truncated = [], False
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
         self._last_recall_returned, self._last_recall_count = False, 0
+        self._last_recall_items, self._last_recall_truncated = [], False
         self._apply_recall_settings({})
 
     @property
@@ -1234,28 +1276,33 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return resp.text
 
-    def _do_recall(self, query: str) -> tuple[str, int]:
+    def _do_recall(self, query: str) -> tuple[str, int, list[dict], bool]:
         """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)
-        -> (text, memory count); the count is 0 for reflect (synthesis) and on error."""
+        -> (text, memory count, items, truncated); count is 0 for reflect (synthesis) and on error,
+        and items are empty there because a synthesis has no discrete memories behind it."""
         if self._recall_max_input_chars:
             query = query[: self._recall_max_input_chars]
         try:
             if self._prefetch_method == "reflect":
                 logger.debug("Recall: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
-                return self._reflect(query) or "", 0
+                return self._reflect(query) or "", 0, [], False
             logger.debug(
                 "Recall: calling recall (bank=%s, query_len=%d, budget=%s)", self._bank_id, len(query), self._budget
             )
             results = self._recall(query)
             logger.debug("Recall: returned %d results", len(results))
-            return "\n".join(f"- {r.text}" for r in results if r.text), len(results)
+            items, truncated = _recall_items(results)
+            return "\n".join(f"- {r.text}" for r in results if r.text), len(results), items, truncated
         except Exception as e:
             logger.debug("Hindsight recall failed: %s", e, exc_info=True)
-            return "", 0
+            return "", 0, [], False
 
-    def _finish_prefetch(self, result: str, count: int) -> str:
+    def _finish_prefetch(self, result: str, count: int, items: Optional[list[dict]] = None,
+                         truncated: bool = False) -> str:
         """Record indicator state (cleared on empty turns, never a stale count); format the block."""
         self._last_recall_returned, self._last_recall_count = bool(result), count if result else 0
+        self._last_recall_items = list(items or []) if result else []
+        self._last_recall_truncated = bool(truncated) if result else False
         if not result:
             logger.debug("Prefetch: no results available")
             return ""
@@ -1279,18 +1326,34 @@ class HindsightMemoryProvider(MemoryProvider):
         # injected memories match this turn's query, not the previous turn's.
         # See NousResearch/hermes-agent#5820.
         if self._recall_sync:
-            return self._finish_prefetch(*(("", 0) if self._recall_disabled() else self._do_recall(query)))
+            return self._finish_prefetch(*(("", 0, [], False) if self._recall_disabled() else self._do_recall(query)))
         # Default: the background worker's result for the previous turn (capped join).
         self._join_prefetch(3.0, log=True)
         with self._prefetch_lock:
             result, count = self._prefetch_result, self._prefetch_count
+            items, truncated = self._prefetch_items, self._prefetch_truncated
             self._prefetch_result, self._prefetch_count = "", 0
-        return self._finish_prefetch(result, count)
+            self._prefetch_items, self._prefetch_truncated = [], False
+        return self._finish_prefetch(result, count, items, truncated)
 
     def recall_status(self) -> Optional[RecallStatus]:
-        """Count injected by the last prefetch; None if nothing injected or ``recall_indicator=false``."""
+        """Count injected by the last prefetch; None if nothing injected or ``recall_indicator=false``.
+
+        ``items``/``truncated`` are keyword-only additions to a FROZEN dataclass, so they must be
+        passed at construction — assigning to the instance would raise on any host, ours included.
+        A host that predates the fields raises TypeError on the keyword; the count is then built
+        without them, because a missing detail must never cost the whole indicator line.
+        """
         if not self._recall_indicator or not self._last_recall_returned:
             return None
+        if self._last_recall_items:
+            try:
+                return RecallStatus(
+                    provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH,
+                    items=self._last_recall_items, truncated=self._last_recall_truncated,
+                )
+            except TypeError:
+                pass
         return RecallStatus(provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
@@ -1303,10 +1366,11 @@ class HindsightMemoryProvider(MemoryProvider):
             # retain to be recall-visible so the warmed context includes it.
             if self._prefetch_waits_for_retain:
                 self._wait_for_retains_drained(self._prefetch_retain_drain_timeout)
-            text, count = self._do_recall(query)
+            text, count, items, truncated = self._do_recall(query)
             if text:
                 with self._prefetch_lock:
                     self._prefetch_result, self._prefetch_count = text, count
+                    self._prefetch_items, self._prefetch_truncated = items, truncated
 
         self._prefetch_thread = spawn_context_thread(_run, name="hindsight-prefetch")
         self._prefetch_thread.start()
@@ -1582,6 +1646,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._join_prefetch(3.0)
         with self._prefetch_lock:
             self._prefetch_result = ""
+            self._prefetch_items, self._prefetch_truncated = [], False
 
         # 3. Rotate to the new session.
         if parent_session_id:
